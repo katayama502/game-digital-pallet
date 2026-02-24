@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ネオン デジタルパレット - Magic Sound Edition</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MediaPipe関連のライブラリ -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #0b0f19;
+      color: white;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    
+    #main-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 10;
+    }
+    
+    #ui-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 20;
+      pointer-events: none;
+    }
+    
+    .pointer-events-auto {
+      pointer-events: auto;
+    }
+
+    .neon-text {
+      text-shadow: 0 0 5px currentColor, 0 0 15px currentColor;
+      transition: color 0.3s ease, text-shadow 0.3s ease;
+    }
+    
+    #preview-canvas {
+      transform: scaleX(-1);
+    }
+
+    /* 音声有効化アニメーション */
+    @keyframes pulse-custom {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.05); opacity: 0.8; }
+    }
+    .animate-pulse-custom {
+      animation: pulse-custom 2s infinite;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="main-canvas"></canvas>
+  
+  <div id="ui-layer" class="p-6 flex flex-col justify-between h-full">
+    
+    <div class="flex justify-between items-start pointer-events-auto">
+      <div>
+        <h1 class="text-4xl font-black text-pink-500 neon-text mb-2 tracking-wider">NEON PALETTE</h1>
+        <p class="text-sm text-gray-300 font-medium">
+          <span class="bg-black/40 px-2 py-1 rounded">👆 描く (魔法の音)</span>
+          <span class="bg-black/40 px-2 py-1 rounded ml-1">✊ 移動</span>
+          <span class="bg-black/40 px-2 py-1 rounded ml-1">✌️ 色変更 (チャイム)</span>
+        </p>
+      </div>
+      
+      <div class="flex flex-col items-end gap-3">
+        <!-- 音声有効化ボタン (ブラウザ制限対策) -->
+        <button id="audio-enable-btn" class="px-6 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 rounded-full font-bold shadow-lg animate-pulse-custom hover:scale-105 transition-transform">
+          🔊 音声を有効にする
+        </button>
+
+        <div id="status-indicator" class="px-5 py-2 rounded-full border-2 border-gray-600 text-gray-400 font-bold tracking-widest text-sm transition-all duration-300">
+          カメラ起動中...
+        </div>
+        
+        <div class="flex gap-3 bg-slate-900/80 p-3 rounded-2xl border border-slate-700 shadow-lg backdrop-blur-sm">
+          <button class="color-btn w-10 h-10 rounded-full bg-pink-500 shadow-[0_0_15px_#ec4899] border-2 border-white transition-transform hover:scale-110" data-color="#ec4899"></button>
+          <button class="color-btn w-10 h-10 rounded-full bg-cyan-400 border-2 border-transparent transition-transform hover:scale-110" data-color="#22d3ee"></button>
+          <button class="color-btn w-10 h-10 rounded-full bg-green-400 border-2 border-transparent transition-transform hover:scale-110" data-color="#4ade80"></button>
+          <button class="color-btn w-10 h-10 rounded-full bg-yellow-400 border-2 border-transparent transition-transform hover:scale-110" data-color="#facc15"></button>
+          <button class="color-btn w-10 h-10 rounded-full bg-purple-500 border-2 border-transparent transition-transform hover:scale-110" data-color="#a855f7"></button>
+          
+          <div class="w-px bg-slate-700 mx-1 my-1"></div>
+          
+          <button id="clear-btn" class="px-4 py-2 bg-slate-800 border border-slate-600 rounded-xl text-white hover:bg-red-500 hover:border-red-500 transition-colors font-bold">クリア</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="w-64 aspect-video bg-black rounded-xl overflow-hidden border-2 border-slate-700 relative pointer-events-auto shadow-2xl">
+      <video id="input-video" class="hidden" autoplay playsinline></video>
+      <canvas id="preview-canvas" class="w-full h-full object-cover"></canvas>
+      <div class="absolute bottom-2 left-2 text-xs bg-black/60 px-2 py-1 rounded text-white font-mono">Camera Preview</div>
+    </div>
+    
+  </div>
+
+  <script>
+    // --- Web Audio API (Magic Sounds) ---
+    let audioCtx = null;
+    let drawOscillator = null;
+    let drawGain = null;
+    let grabOscillator = null;
+    let grabGain = null;
+
+    function initAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      
+      // 描画用の魔法音
+      drawGain = audioCtx.createGain();
+      drawGain.gain.setValueAtTime(0, audioCtx.currentTime);
+      drawGain.connect(audioCtx.destination);
+      
+      // 移動用の浮遊音
+      grabGain = audioCtx.createGain();
+      grabGain.gain.setValueAtTime(0, audioCtx.currentTime);
+      grabGain.connect(audioCtx.destination);
+
+      const enableBtn = document.getElementById('audio-enable-btn');
+      enableBtn.classList.add('hidden');
+    }
+
+    // 描画中の音（キラキラした揺らぎ）
+    function updateDrawSound(active, x, y) {
+      if (!audioCtx) return;
+      
+      if (active) {
+        if (!drawOscillator) {
+          drawOscillator = audioCtx.createOscillator();
+          drawOscillator.type = 'sine'; // 澄んだ音色
+          drawOscillator.connect(drawGain);
+          drawOscillator.start();
+        }
+        // 高さを画面座標に合わせる (100Hz - 1000Hz)
+        const freq = 1000 - (y / window.innerHeight * 800);
+        drawOscillator.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.1);
+        drawGain.gain.setTargetAtTime(0.15, audioCtx.currentTime, 0.1);
+      } else {
+        if (drawGain) drawGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+      }
+    }
+
+    // 色変更時のチャイム（キラキラアルペジオ）
+    function playColorChangeSound() {
+      if (!audioCtx) return;
+      const now = audioCtx.currentTime;
+      const freqs = [523.25, 659.25, 783.99, 1046.50]; // C-E-G-C (High)
+      
+      freqs.forEach((f, i) => {
+        const osc = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(f, now + i * 0.08);
+        g.gain.setValueAtTime(0, now + i * 0.08);
+        g.gain.exponentialRampToValueAtTime(0.2, now + i * 0.08 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.3);
+        osc.connect(g);
+        g.connect(audioCtx.destination);
+        osc.start(now + i * 0.08);
+        osc.stop(now + i * 0.08 + 0.4);
+      });
+    }
+
+    // 移動中の音（低い響き）
+    function updateGrabSound(active) {
+      if (!audioCtx) return;
+      if (active) {
+        if (!grabOscillator) {
+          grabOscillator = audioCtx.createOscillator();
+          grabOscillator.type = 'square';
+          const lowPass = audioCtx.createBiquadFilter();
+          lowPass.type = 'lowpass';
+          lowPass.frequency.setValueAtTime(200, audioCtx.currentTime);
+          grabOscillator.connect(lowPass);
+          lowPass.connect(grabGain);
+          grabOscillator.frequency.setValueAtTime(110, audioCtx.currentTime);
+          grabOscillator.start();
+        }
+        grabGain.gain.setTargetAtTime(0.05, audioCtx.currentTime, 0.2);
+      } else {
+        if (grabGain) grabGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.2);
+      }
+    }
+
+    document.getElementById('audio-enable-btn').addEventListener('click', initAudio);
+    document.body.addEventListener('mousedown', initAudio, { once: true });
+
+    // --- UI & Palette Logic ---
+    const videoElement = document.getElementById('input-video');
+    const previewCanvas = document.getElementById('preview-canvas');
+    const previewCtx = previewCanvas.getContext('2d');
+    const mainCanvas = document.getElementById('main-canvas');
+    const mainCtx = mainCanvas.getContext('2d');
+    const statusIndicator = document.getElementById('status-indicator');
+    const colorBtns = document.querySelectorAll('.color-btn');
+    const clearBtn = document.getElementById('clear-btn');
+
+    const COLORS = ['#ec4899', '#22d3ee', '#4ade80', '#facc15', '#a855f7'];
+    let currentColorIndex = 0;
+    let currentColor = COLORS[currentColorIndex];
+
+    let cursor = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    let currentGesture = 'WAITING';
+    let strokes = [];
+    let currentStroke = null;
+    let globalOffset = { x: 0, y: 0 };
+    
+    let isDrawing = false;
+    let isGrabbing = false;
+    let grabStartPos = { x: 0, y: 0 };
+    let grabStartOffset = { x: 0, y: 0 };
+    let hasChangedColor = false;
+
+    function resize() {
+      mainCanvas.width = window.innerWidth;
+      mainCanvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function changeColorTo(color, silent = false) {
+      currentColor = color;
+      currentColorIndex = COLORS.indexOf(color);
+      colorBtns.forEach(b => {
+        b.style.borderColor = 'transparent';
+        b.style.boxShadow = 'none';
+        if (b.dataset.color === color) {
+          b.style.borderColor = 'white';
+          b.style.boxShadow = `0 0 15px ${currentColor}`;
+        }
+      });
+      document.querySelector('h1').style.color = currentColor;
+      if (!silent) playColorChangeSound();
+    }
+
+    colorBtns.forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        initAudio();
+        changeColorTo(e.target.dataset.color);
+      });
+    });
+
+    clearBtn.addEventListener('click', () => {
+      initAudio();
+      strokes = [];
+      currentStroke = null;
+      globalOffset = { x: 0, y: 0 };
+    });
+
+    function updateStatus(gesture) {
+      if (currentGesture === gesture) return;
+      currentGesture = gesture;
+      
+      statusIndicator.className = 'px-5 py-2 rounded-full border-2 font-bold tracking-widest text-sm transition-all duration-300';
+      statusIndicator.style.backgroundColor = 'transparent';
+      statusIndicator.style.boxShadow = 'none';
+
+      if (gesture === 'WAITING') {
+        statusIndicator.innerText = '手を探しています...';
+        statusIndicator.classList.add('border-gray-600', 'text-gray-400');
+      } else if (gesture === 'HOVER') {
+        statusIndicator.innerText = '待機中 (パー)';
+        statusIndicator.classList.add('border-white', 'text-white', 'bg-white/10');
+      } else if (gesture === 'DRAW') {
+        statusIndicator.innerText = '描画中 (魔法)';
+        statusIndicator.classList.add('border-transparent', 'text-white');
+        statusIndicator.style.backgroundColor = currentColor;
+        statusIndicator.style.boxShadow = `0 0 15px ${currentColor}`;
+      } else if (gesture === 'GRAB') {
+        statusIndicator.innerText = '移動中 (グー)';
+        statusIndicator.classList.add('border-yellow-400', 'text-yellow-400', 'bg-yellow-400/20');
+      } else if (gesture === 'PEACE') {
+        statusIndicator.innerText = '色変更 (ピース)';
+        statusIndicator.classList.add('border-cyan-400', 'text-cyan-400', 'bg-cyan-400/20');
+      }
+    }
+
+    function getPixelPos(landmark) {
+      return { x: (1 - landmark.x) * window.innerWidth, y: landmark.y * window.innerHeight };
+    }
+    
+    function getDist(p1, p2) {
+      return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+    }
+
+    function getGesture(landmarks) {
+      const p = landmarks.map(getPixelPos);
+      const checkOpen = (wrist, pip, tip) => getDist(p[wrist], p[tip]) > getDist(p[wrist], p[pip]) * 1.15;
+
+      const isIndexOpen = checkOpen(0, 6, 8);
+      const isMiddleOpen = checkOpen(0, 10, 12);
+      const isRingOpen = checkOpen(0, 14, 16);
+      const isPinkyOpen = checkOpen(0, 18, 20);
+
+      if (isIndexOpen && isMiddleOpen && !isRingOpen && !isPinkyOpen) return 'PEACE';
+      if (isIndexOpen && !isMiddleOpen && !isRingOpen && !isPinkyOpen) return 'DRAW';
+      if (!isIndexOpen && !isMiddleOpen && !isRingOpen && !isPinkyOpen) return 'GRAB';
+      return 'HOVER';
+    }
+
+    function onResults(results) {
+      // Preview
+      previewCtx.save();
+      if (previewCanvas.width !== results.image.width) {
+        previewCanvas.width = results.image.width;
+        previewCanvas.height = results.image.height;
+      }
+      previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+      previewCtx.drawImage(results.image, 0, 0, previewCanvas.width, previewCanvas.height);
+      if (results.multiHandLandmarks) {
+        for (const landmarks of results.multiHandLandmarks) {
+          drawConnectors(previewCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+          drawLandmarks(previewCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 2});
+        }
+      }
+      previewCtx.restore();
+
+      // Main Logic
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        const gesture = getGesture(landmarks);
+        const p = landmarks.map(getPixelPos);
+        
+        let targetX = (gesture === 'GRAB') ? p[9].x : p[8].x;
+        let targetY = (gesture === 'GRAB') ? p[9].y : p[8].y;
+
+        cursor.x += (targetX - cursor.x) * 0.45;
+        cursor.y += (targetY - cursor.y) * 0.45;
+
+        updateStatus(gesture);
+
+        // Sound Update
+        updateDrawSound(gesture === 'DRAW', cursor.x, cursor.y);
+        updateGrabSound(gesture === 'GRAB');
+
+        if (gesture !== 'DRAW' && isDrawing) {
+          isDrawing = false;
+          if (currentStroke && currentStroke.points.length > 0) strokes.push(currentStroke);
+          currentStroke = null;
+        }
+        if (gesture !== 'GRAB') isGrabbing = false;
+        if (gesture !== 'PEACE') hasChangedColor = false;
+
+        if (gesture === 'DRAW') {
+          if (!isDrawing) {
+            isDrawing = true;
+            currentStroke = { color: currentColor, points: [] };
+          }
+          currentStroke.points.push({ x: cursor.x - globalOffset.x, y: cursor.y - globalOffset.y });
+        } else if (gesture === 'GRAB') {
+          if (!isGrabbing) {
+            isGrabbing = true;
+            grabStartPos = { x: cursor.x, y: cursor.y };
+            grabStartOffset = { x: globalOffset.x, y: globalOffset.y };
+          } else {
+            globalOffset.x = grabStartOffset.x + (cursor.x - grabStartPos.x);
+            globalOffset.y = grabStartOffset.y + (cursor.y - grabStartPos.y);
+          }
+        } else if (gesture === 'PEACE') {
+          if (!hasChangedColor) {
+            hasChangedColor = true;
+            changeColorTo(COLORS[(currentColorIndex + 1) % COLORS.length]);
+          }
+        }
+      } else {
+        updateStatus('WAITING');
+        updateDrawSound(false);
+        updateGrabSound(false);
+        if (isDrawing) {
+          isDrawing = false;
+          if (currentStroke && currentStroke.points.length > 0) strokes.push(currentStroke);
+          currentStroke = null;
+        }
+        isGrabbing = false;
+      }
+    }
+
+    function drawStroke(stroke) {
+      if (stroke.points.length === 0) return;
+      mainCtx.save();
+      mainCtx.translate(globalOffset.x, globalOffset.y);
+      mainCtx.beginPath();
+      for (let i = 0; i < stroke.points.length; i++) {
+        const pt = stroke.points[i];
+        if (i === 0) mainCtx.moveTo(pt.x, pt.y);
+        else mainCtx.lineTo(pt.x, pt.y);
+      }
+      mainCtx.lineCap = 'round'; mainCtx.lineJoin = 'round';
+      mainCtx.strokeStyle = stroke.color;
+      mainCtx.lineWidth = 14; mainCtx.shadowBlur = 25; mainCtx.shadowColor = stroke.color;
+      mainCtx.stroke();
+      mainCtx.lineWidth = 6; mainCtx.shadowBlur = 10;
+      mainCtx.stroke();
+      mainCtx.strokeStyle = '#ffffff'; mainCtx.lineWidth = 3; mainCtx.shadowBlur = 0;
+      mainCtx.stroke();
+      mainCtx.restore();
+    }
+
+    function drawCursor() {
+      if (currentGesture === 'WAITING') return;
+      mainCtx.beginPath();
+      if (currentGesture === 'DRAW') {
+        mainCtx.arc(cursor.x, cursor.y, 8, 0, Math.PI * 2);
+        mainCtx.fillStyle = currentColor;
+        mainCtx.shadowBlur = 15; mainCtx.shadowColor = currentColor;
+        mainCtx.fill();
+        mainCtx.fillStyle = 'white'; mainCtx.arc(cursor.x, cursor.y, 3, 0, Math.PI * 2); mainCtx.fill();
+      } else if (currentGesture === 'GRAB') {
+        mainCtx.arc(cursor.x, cursor.y, 18, 0, Math.PI * 2);
+        mainCtx.fillStyle = 'rgba(250, 204, 21, 0.2)'; mainCtx.fill();
+        mainCtx.strokeStyle = '#facc15'; mainCtx.lineWidth = 3; mainCtx.stroke();
+        mainCtx.moveTo(cursor.x - 8, cursor.y); mainCtx.lineTo(cursor.x + 8, cursor.y);
+        mainCtx.moveTo(cursor.x, cursor.y - 8); mainCtx.lineTo(cursor.x, cursor.y + 8);
+        mainCtx.stroke();
+      } else if (currentGesture === 'PEACE') {
+        mainCtx.arc(cursor.x, cursor.y, 12, 0, Math.PI * 2);
+        mainCtx.fillStyle = currentColor; mainCtx.shadowBlur = 20; mainCtx.shadowColor = currentColor;
+        mainCtx.fill();
+        mainCtx.fillStyle = 'white'; mainCtx.font = "16px sans-serif"; mainCtx.textAlign = "center"; mainCtx.textBaseline = "middle";
+        mainCtx.fillText("✨", cursor.x, cursor.y);
+      } else {
+        mainCtx.arc(cursor.x, cursor.y, 10, 0, Math.PI * 2);
+        mainCtx.strokeStyle = 'rgba(255, 255, 255, 0.8)'; mainCtx.lineWidth = 2; mainCtx.stroke();
+      }
+      mainCtx.shadowBlur = 0;
+    }
+
+    function render() {
+      mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+      mainCtx.globalCompositeOperation = 'screen';
+      strokes.forEach(stroke => drawStroke(stroke));
+      if (currentStroke) drawStroke(currentStroke);
+      mainCtx.globalCompositeOperation = 'source-over';
+      drawCursor();
+      requestAnimationFrame(render);
+    }
+
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.75, minTrackingConfidence: 0.75 });
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => await hands.send({image: videoElement}),
+      width: 640, height: 480
+    });
+    camera.start();
+    render();
+
+  </script>
+</body>
+</html>
